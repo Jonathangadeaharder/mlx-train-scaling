@@ -1,8 +1,8 @@
 # mlx-train-scaling
 
 A minimal transformer **training loop** on Apple Silicon (MLX), instrumented to show how the
-levers a training-pipeline engineer pulls — batch size, sequence length, gradient accumulation —
-trade **throughput against memory**.
+levers a training-pipeline engineer pulls — batch size, sequence length, gradient accumulation,
+and **data parallelism (gradient all-reduce)** — trade **throughput against memory**.
 
 > **Headline:** gradient accumulation grows the effective batch **4× at +2–7% memory**, where
 > a 4× *real* batch costs ~linear memory. But in a lazy framework the win only materializes if
@@ -33,9 +33,13 @@ trade **throughput against memory**.
 ## Usage
 
 ```bash
-uv run train.py                                   # default sweep (self-contained via PEP 723)
+# single-process scaling sweep
 uv run train.py --batch-sizes 4 8 16 --seq-lens 256 512 --accum-steps 1 4
 uv run train.py --dim 512 --layers 8 --heads 8    # bigger model
+
+# data-parallel: N ranks on one host (MLX ring backend, no MPI)
+uv run dp_train.py                                                          # 1-rank baseline
+uv run --with mlx mlx.launch --backend ring --hosts 127.0.0.1 --repeat-hosts 4 dp_train.py
 ```
 
 ## Requirements
@@ -43,7 +47,12 @@ uv run train.py --dim 512 --layers 8 --heads 8    # bigger model
 - macOS, Apple Silicon
 - [`uv`](https://docs.astral.sh/uv/) — handles Python + MLX; nothing else to install
 
-## Status / roadmap
+## Data parallelism
 
-Single-node, single-GPU. Structured to extend to **data-parallel training with gradient
-all-reduce** across processes (the distributed pattern) as the next step.
+`dp_train.py` is real data-parallel training on MLX's distributed ring backend — full model
+replica per rank, **gradient all-reduce** each step, replicas kept bit-identical (asserted via
+`replica_drift`). On this single-GPU machine it demonstrates **correctness**, not speedup:
+aggregate throughput falls 1→2 ranks because the ranks time-share one device (same lesson as
+[par-vs-batch-bench](https://github.com/Jonathangadeaharder/par-vs-batch-bench) — replication
+loses to a bigger batch on one device). The code path is the one that scales on multiple
+physical devices. See [docs/findings.md](docs/findings.md#data-parallel-across-processes-gradient-all-reduce).
