@@ -74,18 +74,49 @@ the high end as "bandwidth-bound, diminishing returns," not as precise rankings.
 - **Stop scaling effective batch once throughput flattens** — past the bandwidth knee you pay
   compute for no tok/s.
 
-## Limitations & next steps
+## Data-parallel across processes (gradient all-reduce)
 
-- Single device, single process — this measures the *single-node* training levers. The natural
-  extension is **data-parallel across processes with gradient all-reduce** (the distributed
-  pattern), which this harness is structured to add.
-- Synthetic data and a small model; absolute tok/s is not comparable to production training,
-  but the *scaling shapes* (accumulation vs real batch vs seq len) are model-agnostic.
+`dp_train.py` implements real data parallelism on MLX's distributed **ring backend**: each
+rank holds a full model replica and a distinct data shard, and every step **all-reduces
+(averages) gradients** so all replicas apply the same update.
+
+| ranks | eff. batch | tok/s (aggregate) | peak GB / rank | replica drift |
+|-------|------------|-------------------|----------------|---------------|
+| 1     | 8          | 52464             | 1.50           | 0             |
+| 2     | 16         | 30187             | 1.27           | 0             |
+| 4     | 32         | 30901             | 1.27           | 0             |
+
+**Correctness:** `replica_drift` (max − min of a per-rank parameter checksum) is exactly 0 at
+every rank count — the all-reduce keeps replicas bit-identical, so the run equals single-device
+training at `ranks ×` batch. `dp_train.py` asserts this each run.
+
+**Scaling:** aggregate throughput *falls* 1 → 2 ranks and stays flat to 4. There is one
+physical GPU; data-parallel ranks time-share it and add all-reduce traffic, so replication buys
+no compute — it costs it. This is the training-side mirror of the inference result in
+[par-vs-batch-bench](https://github.com/Jonathangadeaharder/par-vs-batch-bench): on a single
+unified-memory device, **replication loses to a single larger batch.**
+
+**Implication:** to grow the effective batch on one device, prefer gradient accumulation
+(single process: 43k tok/s at effective batch 16, above) over data parallelism (30k at effective
+batch 16). DP pays off only across *multiple physical devices* — the code path here is the same
+one that scales on a multi-node ring; this machine just can't show the speedup.
+
+## Limitations
+
+- One physical GPU, so multi-device DP speedup is not demonstrable here — only its correctness
+  and the single-device contention cost.
+- Synthetic data and a small model; absolute tok/s is not comparable to production training, but
+  the *scaling shapes* (accumulation vs real batch vs seq len vs replication) are model-agnostic.
 - Greedy/dense attention, no flash-attention kernel, no activation checkpointing — each would
   shift the memory/throughput constants.
 
 ## Reproduce
 
 ```bash
+# single-process scaling sweep
 uv run train.py --batch-sizes 4 8 16 --seq-lens 256 512 --accum-steps 1 4
+
+# data-parallel (N ranks on one host, ring backend)
+uv run dp_train.py                                                          # 1-rank baseline
+uv run --with mlx mlx.launch --backend ring --hosts 127.0.0.1 --repeat-hosts 4 dp_train.py
 ```
