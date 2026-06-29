@@ -73,8 +73,9 @@ def main():
         last = step()
         times.append(time.perf_counter() - t0)
 
-    # replica-sync check: every rank's parameter checksum must agree
-    chk = mx.array([sum(float(p.sum().item()) for _, p in tree_flatten(model.parameters()))])
+    # replica-sync check: every rank's parameter checksum must agree.
+    # Sum on-GPU in one deferred op (no per-parameter .item() round-trips).
+    chk = mx.sum(mx.stack([p.sum() for _, p in tree_flatten(model.parameters())])).reshape(1)
     gathered = mx.distributed.all_gather(chk) if size > 1 else chk
     mx.eval(gathered)
     drift = (gathered.max() - gathered.min()).item()
